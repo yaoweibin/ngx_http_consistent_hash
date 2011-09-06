@@ -3,6 +3,7 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
+#include <ngx_md5.h>
 
 #define CONSISTENT_DEBUG 0
 
@@ -47,6 +48,8 @@ static void * ngx_http_upstream_consistent_hash_create_srv_conf(ngx_conf_t *cf);
 
 static ngx_int_t ngx_http_upstream_init_consistent_hash(ngx_conf_t*, 
         ngx_http_upstream_srv_conf_t*);
+static int32_t ngx_http_upstream_consistent_hash_node_point(u_char *str, 
+        size_t len);
 static ngx_int_t ngx_http_upstream_init_consistent_hash_peer(
         ngx_http_request_t*, ngx_http_upstream_srv_conf_t*);
 static char * ngx_http_upstream_consistent_hash(ngx_conf_t*,
@@ -123,8 +126,6 @@ ngx_http_upstream_init_consistent_hash(ngx_conf_t *cf,
     ngx_http_upstream_consistent_hash_buckets    *buckets;
     ngx_http_upstream_consistent_hash_continuum  *continuum;
 
-    step = (uint32_t) (0xffffffff / MMC_CONSISTENT_BUCKETS);
-
     buckets = ngx_pcalloc(cf->pool, 
             sizeof(ngx_http_upstream_consistent_hash_buckets));
 
@@ -149,21 +150,26 @@ ngx_http_upstream_init_consistent_hash(ngx_conf_t *cf,
     for (i = 0; i < us->servers->nelts; i++) {
         for (j = 0; j < server[i].naddrs; j++) {
             for (k = 0; k < ((MMC_CONSISTENT_POINTS * server[i].weight) / server[i].naddrs); k++) {
+
                 ngx_memzero(hash_data, 28);
                 ngx_snprintf(hash_data, 28, "%V-%ui", &server[i].addrs[j].name, k);
+                continuum->nodes[continuum->nnodes].point =
+                    ngx_http_upstream_consistent_hash_node_point(hash_data, ngx_strlen(hash_data));
+
                 continuum->nodes[continuum->nnodes].sockaddr = server[i].addrs[j].sockaddr;
                 continuum->nodes[continuum->nnodes].socklen = server[i].addrs[j].socklen;
                 continuum->nodes[continuum->nnodes].name = server[i].addrs[j].name;
                 continuum->nodes[continuum->nnodes].name.data[server[i].addrs[j].name.len] = 0;
-                continuum->nodes[continuum->nnodes].point = ngx_crc32_long(hash_data, ngx_strlen(hash_data));
                 continuum->nnodes++;
             }
         }
     }
 
-    qsort(continuum->nodes, continuum->nnodes, 
+    ngx_qsort(continuum->nodes, continuum->nnodes, 
             sizeof(ngx_http_upstream_consistent_hash_node), 
             (const void*) ngx_http_upstream_consistent_hash_compare_continuum_nodes);
+
+    step = (uint32_t) (0xffffffff / MMC_CONSISTENT_BUCKETS);
 
     for (i = 0; i < MMC_CONSISTENT_BUCKETS; i++) {
         buckets->buckets[i] = 
@@ -179,6 +185,20 @@ ngx_http_upstream_init_consistent_hash(ngx_conf_t *cf,
     us->peer.data = buckets;
 
     return NGX_OK;
+}
+
+
+static int32_t 
+ngx_http_upstream_consistent_hash_node_point(u_char *str, size_t len)
+{
+    u_char     md5_buf[16];
+    ngx_md5_t  md5;
+
+    ngx_md5_init(&md5);
+    ngx_md5_update(&md5, str, len);
+    ngx_md5_final(md5_buf, &md5);
+
+    return ngx_crc32_long(md5_buf, 16);
 }
 
 
