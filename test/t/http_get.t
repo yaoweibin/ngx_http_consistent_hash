@@ -29,7 +29,7 @@ run_tests();
 
 __DATA__
 
-=== TEST 1: the first time request, hit apache
+=== TEST 1: the first time request
 --- http_config
     upstream test{      
         server www.ruby-lang.org;
@@ -51,7 +51,7 @@ GET /
 --- response_headers_like
 Server: Apache.*
 
-=== TEST 2: the second time request, hit apache 
+=== TEST 2: the second time request
 --- http_config
     upstream test{      
         server www.ruby-lang.org;
@@ -67,14 +67,13 @@ Server: Apache.*
         proxy_pass http://test;
     }
 --- more_headers
-Host: www.ruby-lang.org
+Host: www.nginx.org
 --- request
 GET /en/download.html
---- error_code: 404
 --- response_headers_like
-Server: Apache.*
+Server: nginx.*
 
-=== TEST 3: the third time request, hit Apache
+=== TEST 3: the third time request
 --- http_config
     upstream test{      
         server www.ruby-lang.org;
@@ -97,7 +96,7 @@ GET /en/security_advisories.html
 --- response_headers_like
 Server: Apache.*
 
-=== TEST 4: the forth time request, hit Apache
+=== TEST 4: the forth time request
 --- http_config
     upstream test{      
         server www.ruby-lang.org;
@@ -118,9 +117,9 @@ Host: www.nginx.org
 GET /en/documentation/
 --- error_code: 404
 --- response_headers_like
-Server: Apache.*
+Server: nginx.*
 
-=== TEST 5: the first time request, hit nginx 
+=== TEST 5: the first time request 
 --- http_config
     upstream test{      
         server www.ruby-lang.org;
@@ -143,7 +142,7 @@ GET /en/security/
 --- response_headers_like
 Server: nginx.*
 
-=== TEST 6: the second time request, hit nginx
+=== TEST 6: the second time request
 --- http_config
     upstream test{      
         server www.ruby-lang.org;
