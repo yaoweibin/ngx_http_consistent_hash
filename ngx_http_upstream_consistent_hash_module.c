@@ -18,7 +18,7 @@ typedef struct {
 
 typedef struct {
     uint32_t                     point;
-    ngx_addr_t                  *addr;
+    ngx_http_upstream_rr_peer_t *rr_peer;
 } ngx_http_upstream_consistent_hash_node;
 
 typedef struct {
@@ -27,42 +27,47 @@ typedef struct {
 } ngx_http_upstream_consistent_hash_continuum;
 
 typedef struct {
-    ngx_http_upstream_consistent_hash_node       *buckets[MMC_CONSISTENT_BUCKETS];
+    /* the round robin data must be first */
+    ngx_http_upstream_rr_peers_t                  rr_peers;
+    ngx_http_upstream_consistent_hash_node       *bucket[MMC_CONSISTENT_BUCKETS];
     ngx_http_upstream_consistent_hash_continuum  *continuum;
-    ngx_uint_t                                    number;
 } ngx_http_upstream_consistent_hash_buckets;
 
 typedef struct {
-    ngx_http_upstream_consistent_hash_buckets    *peers;
+    /* the round robin data must be first */
+    ngx_http_upstream_rr_peer_data_t              rrp;
+    ngx_http_upstream_consistent_hash_buckets    *buckets;
     uint32_t                                      point;
+    u_char                                        tries;
+    ngx_event_get_peer_pt                         get_rr_peer;
 } ngx_http_upstream_consistent_hash_peer_data_t;
 
-static void * ngx_http_upstream_consistent_hash_create_srv_conf(ngx_conf_t *cf);
-
-static ngx_int_t ngx_http_upstream_init_consistent_hash(ngx_conf_t*, 
+static ngx_int_t ngx_http_upstream_init_consistent_hash(ngx_conf_t *, 
         ngx_http_upstream_srv_conf_t*);
-static int32_t ngx_http_upstream_consistent_hash_node_point(u_char *str, 
-        size_t len);
 static ngx_int_t ngx_http_upstream_init_consistent_hash_peer(
         ngx_http_request_t*, ngx_http_upstream_srv_conf_t*);
-static char * ngx_http_upstream_consistent_hash(ngx_conf_t*,
-        ngx_command_t*, void*);
-static ngx_int_t ngx_http_upstream_get_consistent_hash_peer(
-        ngx_peer_connection_t*, void*);
-static void ngx_http_upstream_free_consistent_hash_peer(
-        ngx_peer_connection_t*, void*, ngx_uint_t); 
+static ngx_http_upstream_rr_peer_t *
+ngx_http_upstream_consistent_hash_find_rr_peer(
+        ngx_http_upstream_rr_peers_t *peers, struct sockaddr  *addr);
+static int32_t ngx_http_upstream_consistent_hash_node_point(u_char *str, 
+        size_t len);
 static int ngx_http_upstream_consistent_hash_compare_continuum_nodes (
         const ngx_http_upstream_consistent_hash_node*, 
         const ngx_http_upstream_consistent_hash_node*);
+static ngx_http_upstream_consistent_hash_node* 
+ngx_http_upstream_consistent_hash_find(
+        ngx_http_upstream_consistent_hash_continuum*, uint32_t);
 #if (CONSISTENT_DEBUG)
 static void ngx_http_upstream_consistent_hash_print_continuum (ngx_conf_t*, 
         ngx_http_upstream_consistent_hash_continuum*);
 static void ngx_http_upstream_consistent_hash_print_buckets (ngx_conf_t *cf, 
         ngx_http_upstream_consistent_hash_buckets*);
 #endif
-static ngx_http_upstream_consistent_hash_node* 
-ngx_http_upstream_consistent_hash_find(
-        ngx_http_upstream_consistent_hash_continuum*, uint32_t);
+static ngx_int_t ngx_http_upstream_get_consistent_hash_peer(
+        ngx_peer_connection_t*, void*);
+static char * ngx_http_upstream_consistent_hash(ngx_conf_t*,
+        ngx_command_t*, void*);
+static void * ngx_http_upstream_consistent_hash_create_srv_conf(ngx_conf_t *cf);
 
 
 static ngx_command_t  ngx_http_upstream_consistent_hash_commands[] = { 
@@ -119,13 +124,20 @@ ngx_http_upstream_init_consistent_hash(ngx_conf_t *cf,
     ngx_uint_t                                    i, j, k, n;
     ngx_uint_t                                    real_nodes, points_per_node;
     ngx_http_upstream_server_t                   *server;
+    ngx_http_upstream_rr_peer_t                  *rr_peer;
+    ngx_http_upstream_rr_peers_t                 *prr_peers;
     ngx_http_upstream_consistent_hash_buckets    *buckets;
     ngx_http_upstream_consistent_hash_continuum  *continuum;
 
+    if (ngx_http_upstream_init_round_robin(cf, us) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    prr_peers = us->peer.data;
+    us->peer.init = ngx_http_upstream_init_consistent_hash_peer;
+
     buckets = ngx_pcalloc(cf->pool, 
             sizeof(ngx_http_upstream_consistent_hash_buckets));
-
-    us->peer.init = ngx_http_upstream_init_consistent_hash_peer;
 
     if (!us->servers) {
         return NGX_ERROR;
@@ -156,13 +168,22 @@ ngx_http_upstream_init_consistent_hash(ngx_conf_t *cf,
 
     for (i = 0; i < us->servers->nelts; i++) {
         for (j = 0; j < server[i].naddrs; j++) {
+
+            rr_peer = ngx_http_upstream_consistent_hash_find_rr_peer(prr_peers,
+                    server[i].addrs[j].sockaddr);
+            if (rr_peer == NULL) {
+                return NGX_ERROR;
+            }
+
             for (k = 0; k < (points_per_node * server[i].weight); k++) {
+                last = ngx_snprintf(hash_data, 28, "%V-%ui",
+                        &server[i].addrs[j].name, k);
 
-                last = ngx_snprintf(hash_data, 28, "%V-%ui", &server[i].addrs[j].name, k);
                 continuum->nodes[continuum->nnodes].point =
-                    ngx_http_upstream_consistent_hash_node_point(hash_data, (last - hash_data));
+                    ngx_http_upstream_consistent_hash_node_point(hash_data, 
+                            (last - hash_data));
 
-                continuum->nodes[continuum->nnodes].addr = &server[i].addrs[j];
+                continuum->nodes[continuum->nnodes].rr_peer = rr_peer;
                 continuum->nnodes++;
             }
         }
@@ -175,7 +196,7 @@ ngx_http_upstream_init_consistent_hash(ngx_conf_t *cf,
     step = (uint32_t) (0xffffffff / MMC_CONSISTENT_BUCKETS);
 
     for (i = 0; i < MMC_CONSISTENT_BUCKETS; i++) {
-        buckets->buckets[i] = 
+        buckets->bucket[i] = 
             ngx_http_upstream_consistent_hash_find(continuum, step * i);
     }
 
@@ -185,11 +206,27 @@ ngx_http_upstream_init_consistent_hash(ngx_conf_t *cf,
 #endif
 
     buckets->continuum = continuum;
-    buckets->number = n;
+    ngx_memcpy(&buckets->rr_peers, prr_peers, sizeof(ngx_http_upstream_rr_peers_t));
 
     us->peer.data = buckets;
 
     return NGX_OK;
+}
+
+
+static ngx_http_upstream_rr_peer_t *
+ngx_http_upstream_consistent_hash_find_rr_peer(
+        ngx_http_upstream_rr_peers_t *peers, struct sockaddr  *addr)
+{
+    ngx_uint_t                   i;
+
+    for (i = 0; i < peers->number; i++) {
+        if (peers->peer[i].sockaddr == addr) {
+            return &peers->peer[i];
+        }
+    }
+
+    return NULL;
 }
 
 
@@ -220,67 +257,6 @@ ngx_http_upstream_consistent_hash_compare_continuum_nodes(
     }
 
     return 0;
-}
-
-
-static ngx_int_t
-ngx_http_upstream_init_consistent_hash_peer(ngx_http_request_t *r,
-        ngx_http_upstream_srv_conf_t *us)
-{
-    ngx_str_t                                          evaluated_key_to_hash;
-    ngx_http_upstream_consistent_hash_srv_conf_t      *uchscf;
-    ngx_http_upstream_consistent_hash_peer_data_t     *uchpd;
-
-    uchscf = ngx_http_conf_upstream_srv_conf(us,
-                                          ngx_http_upstream_consistent_hash_module);
-    if (uchscf == NULL) {
-        return NGX_ERROR;
-    }
-
-    uchpd = ngx_pcalloc(r->pool, sizeof(ngx_http_upstream_consistent_hash_peer_data_t));
-    if (uchpd == NULL) {
-        return NGX_ERROR;
-    }
-
-    r->upstream->peer.data = uchpd;
-    uchpd->peers = us->peer.data;
-
-    if (ngx_http_script_run(r, &evaluated_key_to_hash, 
-                uchscf->lengths->elts, 0, uchscf->values->elts) == NULL)
-    {
-        return NGX_ERROR;
-    }
-
-    uchpd->point = 
-        ngx_crc32_long(evaluated_key_to_hash.data, evaluated_key_to_hash.len);
-
-    r->upstream->peer.free = ngx_http_upstream_free_consistent_hash_peer;
-    r->upstream->peer.get = ngx_http_upstream_get_consistent_hash_peer;
-    r->upstream->peer.tries = uchpd->peers->number;
-
-    return NGX_OK;
-}
-
-
-static ngx_int_t
-ngx_http_upstream_get_consistent_hash_peer(ngx_peer_connection_t *pc, 
-        void *data)
-{
-    ngx_addr_t                                    *peer_addr;
-    ngx_http_upstream_consistent_hash_peer_data_t *uchpd = data;
-
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, pc->log, 0,
-                   "consistent hash point: %ui", uchpd->point);
-
-    pc->cached = 0;
-    pc->connection = NULL;
-
-    peer_addr = uchpd->peers->buckets[uchpd->point % MMC_CONSISTENT_BUCKETS]->addr;
-    pc->sockaddr = peer_addr->sockaddr;
-    pc->socklen = peer_addr->socklen;
-    pc->name = &peer_addr->name;
-
-    return NGX_OK;
 }
 
 
@@ -318,32 +294,130 @@ ngx_http_upstream_consistent_hash_find(
 }
 
 
-static void 
-ngx_http_upstream_free_consistent_hash_peer(ngx_peer_connection_t *pc, void *data, 
-        ngx_uint_t state) 
+static ngx_int_t
+ngx_http_upstream_init_consistent_hash_peer(ngx_http_request_t *r,
+        ngx_http_upstream_srv_conf_t *us)
 {
-    ngx_http_upstream_consistent_hash_peer_data_t  *chp = data;
+    ngx_str_t                                          evaluated_key_to_hash;
+    ngx_http_upstream_consistent_hash_srv_conf_t      *uchscf;
+    ngx_http_upstream_consistent_hash_peer_data_t     *uchpd;
+
+    uchscf = ngx_http_conf_upstream_srv_conf(us,
+                                          ngx_http_upstream_consistent_hash_module);
+    if (uchscf == NULL) {
+        return NGX_ERROR;
+    }
+
+    uchpd = ngx_pcalloc(r->pool, sizeof(ngx_http_upstream_consistent_hash_peer_data_t));
+    if (uchpd == NULL) {
+        return NGX_ERROR;
+    }
+
+    r->upstream->peer.data = &uchpd->rrp;
+
+    if (ngx_http_upstream_init_round_robin_peer(r, us) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    r->upstream->peer.get = ngx_http_upstream_get_consistent_hash_peer;
+
+    uchpd->buckets = us->peer.data;
+    uchpd->tries = 0;
+
+    if (ngx_http_script_run(r, &evaluated_key_to_hash, 
+                uchscf->lengths->elts, 0, uchscf->values->elts) == NULL)
+    {
+        return NGX_ERROR;
+    }
+
+    uchpd->point = 
+        ngx_crc32_long(evaluated_key_to_hash.data, evaluated_key_to_hash.len);
+
+    uchpd->get_rr_peer = ngx_http_upstream_get_round_robin_peer;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
+ngx_http_upstream_get_consistent_hash_peer(ngx_peer_connection_t *pc, 
+        void *data)
+{
+    time_t                                         now;
+    uint32_t                                       point;
+    uintptr_t                                      m;
+    ngx_uint_t                                     n, p;
+    ngx_http_upstream_rr_peer_t                   *peer;
+    ngx_http_upstream_consistent_hash_peer_data_t *uchpd = data;
 
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pc->log, 0,
-                   "free consistent hash peer %ui %ui", pc->tries, state);
+                   "consistent hash point: %ui, try: %ui", uchpd->point, pc->tries);
 
-    if (state == 0 && pc->tries == 0) {
-        return;
+    if (uchpd->tries > 20 || uchpd->rrp.peers->single) {
+        return uchpd->get_rr_peer(pc, &uchpd->rrp);
     }
 
-    if (chp->peers->number == 1) {
-        pc->tries = 0;
-        return;
+    now = ngx_time();
+
+    pc->cached = 0;
+    pc->connection = NULL;
+
+    point = uchpd->point;
+
+    for ( ;; ) {
+
+        point += 89 * uchpd->tries; 
+
+        p = point % uchpd->rrp.peers->number;
+
+        n = p / (8 * sizeof(uintptr_t));
+        m = (uintptr_t) 1 << p % (8 * sizeof(uintptr_t));
+
+        if (!(uchpd->rrp.tried[n] & m)) {
+
+            ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pc->log, 0,
+                           "get consistent hash peer, hash: %ui %04XA", p, m);
+
+            peer = uchpd->buckets->bucket[point % MMC_CONSISTENT_BUCKETS]->rr_peer;
+
+            /* ngx_lock_mutex(uchpd->rrp.peers->mutex); */
+
+            if (!peer->down) {
+
+                if (peer->max_fails == 0 || peer->fails < peer->max_fails) {
+                    break;
+                }
+
+                if (now - peer->accessed > peer->fail_timeout) {
+                    peer->fails = 0;
+                    break;
+                }
+            }
+
+            uchpd->rrp.tried[n] |= m;
+
+            /* ngx_unlock_mutex(uchpd->rrp.peers->mutex); */
+
+            pc->tries--;
+        }
+
+        if (++uchpd->tries >= 20) {
+            return uchpd->get_rr_peer(pc, &uchpd->rrp);
+        }
     }
 
-    if (state & (NGX_PEER_FAILED | NGX_PEER_NEXT)) {
-        /* Next 7th bucket in the ring, try to avoid the same server */
-        chp->point += MMC_CONSISTENT_BUCKETS * 7;
-    }
+    uchpd->rrp.current = p;
 
-    if (pc->tries) {
-        pc->tries--;
-    }
+    pc->sockaddr = peer->sockaddr;
+    pc->socklen = peer->socklen;
+    pc->name = &peer->name;
+
+    /* ngx_unlock_mutex(uchpd->rrp.peers->mutex); */
+
+    uchpd->rrp.tried[n] |= m;
+    uchpd->point = point;
+
+    return NGX_OK;
 }
 
 
@@ -413,11 +487,11 @@ ngx_http_upstream_consistent_hash_print_continuum (ngx_conf_t *cf,
 {
     ngx_uint_t i;
 
-    printf("print continuum\n");
+    printf("print continuum:\n");
 
     for (i = 0; i < continuum->nnodes; i++) {
         printf("%i: name %.19s point %u\n", (int)i, 
-                (char*)continuum->nodes[i].addr->name.data, 
+                (char*)continuum->nodes[i].rr_peer->name.data, 
                 (unsigned int)continuum->nodes[i].point);
     }
 }
@@ -429,12 +503,12 @@ ngx_http_upstream_consistent_hash_print_buckets (ngx_conf_t *cf,
 {
     ngx_uint_t i;
 
-    printf("print buckets\n");
+    printf("print buckets:\n");
 
     for (i = 0; i < MMC_CONSISTENT_BUCKETS; i++) {
         printf("%i: name %s point %u\n", (int)i,
-                (char*)buckets->buckets[i]->addr->name.data, 
-                (unsigned int)buckets->buckets[i]->point);
+                (char*)buckets->bucket[i]->rr_peer->name.data, 
+                (unsigned int)buckets->bucket[i]->point);
     }
 }
 #endif
