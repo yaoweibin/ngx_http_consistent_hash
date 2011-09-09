@@ -14,6 +14,7 @@
 typedef struct {
     ngx_array_t                 *values;
     ngx_array_t                 *lengths;
+    void                        *data; /* store the hash buckets*/
 } ngx_http_upstream_consistent_hash_srv_conf_t;
 
 typedef struct {
@@ -27,8 +28,6 @@ typedef struct {
 } ngx_http_upstream_consistent_hash_continuum;
 
 typedef struct {
-    /* the round robin data must be first */
-    ngx_http_upstream_rr_peers_t                  rr_peers;
     ngx_http_upstream_consistent_hash_node       *bucket[MMC_CONSISTENT_BUCKETS];
     ngx_http_upstream_consistent_hash_continuum  *continuum;
 } ngx_http_upstream_consistent_hash_buckets;
@@ -127,7 +126,15 @@ ngx_http_upstream_init_consistent_hash(ngx_conf_t *cf,
     ngx_http_upstream_rr_peer_t                  *rr_peer;
     ngx_http_upstream_rr_peers_t                 *prr_peers;
     ngx_http_upstream_consistent_hash_buckets    *buckets;
-    ngx_http_upstream_consistent_hash_continuum  *continuum;
+    ngx_http_upstream_consistent_hash_continuum       *continuum;
+    ngx_http_upstream_consistent_hash_srv_conf_t      *uchscf;
+
+
+    uchscf = ngx_http_conf_upstream_srv_conf(us,
+            ngx_http_upstream_consistent_hash_module);
+    if (uchscf == NULL) {
+        return NGX_ERROR;
+    }
 
     if (ngx_http_upstream_init_round_robin(cf, us) != NGX_OK) {
         return NGX_ERROR;
@@ -206,9 +213,7 @@ ngx_http_upstream_init_consistent_hash(ngx_conf_t *cf,
 #endif
 
     buckets->continuum = continuum;
-    ngx_memcpy(&buckets->rr_peers, prr_peers, sizeof(ngx_http_upstream_rr_peers_t));
-
-    us->peer.data = buckets;
+    uchscf->data = buckets;
 
     return NGX_OK;
 }
@@ -303,7 +308,7 @@ ngx_http_upstream_init_consistent_hash_peer(ngx_http_request_t *r,
     ngx_http_upstream_consistent_hash_peer_data_t     *uchpd;
 
     uchscf = ngx_http_conf_upstream_srv_conf(us,
-                                          ngx_http_upstream_consistent_hash_module);
+            ngx_http_upstream_consistent_hash_module);
     if (uchscf == NULL) {
         return NGX_ERROR;
     }
@@ -321,7 +326,7 @@ ngx_http_upstream_init_consistent_hash_peer(ngx_http_request_t *r,
 
     r->upstream->peer.get = ngx_http_upstream_get_consistent_hash_peer;
 
-    uchpd->buckets = us->peer.data;
+    uchpd->buckets = uchscf->data;
     uchpd->tries = 0;
 
     if (ngx_http_script_run(r, &evaluated_key_to_hash, 
@@ -366,6 +371,7 @@ ngx_http_upstream_get_consistent_hash_peer(ngx_peer_connection_t *pc,
 
     for ( ;; ) {
 
+        /* move to other buckets */
         point += 89 * uchpd->tries; 
 
         p = point % uchpd->rrp.peers->number;
@@ -427,7 +433,7 @@ ngx_http_upstream_consistent_hash_create_srv_conf(ngx_conf_t *cf)
     ngx_http_upstream_consistent_hash_srv_conf_t  *conf;
 
     conf = ngx_pcalloc(cf->pool,
-                       sizeof(ngx_http_upstream_consistent_hash_srv_conf_t));
+            sizeof(ngx_http_upstream_consistent_hash_srv_conf_t));
     if (conf == NULL) {
         return NULL;
     }
@@ -456,7 +462,7 @@ ngx_http_upstream_consistent_hash(ngx_conf_t *cf, ngx_command_t *cmd, void *conf
     uscf = ngx_http_conf_get_module_srv_conf(cf, ngx_http_upstream_module);
 
     uchscf = ngx_http_conf_upstream_srv_conf(uscf,
-                                          ngx_http_upstream_consistent_hash_module);
+            ngx_http_upstream_consistent_hash_module);
 
     ngx_memzero(&sc, sizeof(ngx_http_script_compile_t));
 
