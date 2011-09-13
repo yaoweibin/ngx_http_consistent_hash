@@ -235,6 +235,9 @@ ngx_http_upstream_consistent_hash_find_rr_peer(
 }
 
 
+/* The md5 hash vaule has better random value with the input string than crc32.
+ * And the virtual node can be dispersed uniformly in the ring.
+ * */
 static int32_t 
 ngx_http_upstream_consistent_hash_node_point(u_char *str, size_t len)
 {
@@ -313,7 +316,8 @@ ngx_http_upstream_init_consistent_hash_peer(ngx_http_request_t *r,
         return NGX_ERROR;
     }
 
-    uchpd = ngx_pcalloc(r->pool, sizeof(ngx_http_upstream_consistent_hash_peer_data_t));
+    uchpd = ngx_pcalloc(r->pool, 
+            sizeof(ngx_http_upstream_consistent_hash_peer_data_t));
     if (uchpd == NULL) {
         return NGX_ERROR;
     }
@@ -356,7 +360,8 @@ ngx_http_upstream_get_consistent_hash_peer(ngx_peer_connection_t *pc,
     ngx_http_upstream_consistent_hash_peer_data_t *uchpd = data;
 
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, pc->log, 0,
-                   "consistent hash point: %ui, try: %ui", uchpd->point, pc->tries);
+                   "consistent hash point: %ui, try: %ui", 
+                   uchpd->point, pc->tries);
 
     if (uchpd->tries > 20 || uchpd->rrp.peers->single) {
         return uchpd->get_rr_peer(pc, &uchpd->rrp);
@@ -442,7 +447,8 @@ ngx_http_upstream_consistent_hash_create_srv_conf(ngx_conf_t *cf)
      * set by ngx_pcalloc(): 
      *
      *     conf->lengths = NULL; 
-     *     conf->values = NULL;
+     *     conf->values  = NULL;
+     *     conf->data    = NULL;
     */
 
     return conf;
@@ -480,7 +486,10 @@ ngx_http_upstream_consistent_hash(ngx_conf_t *cf, ngx_command_t *cmd, void *conf
     uscf->peer.init_upstream = ngx_http_upstream_init_consistent_hash;
 
     uscf->flags = NGX_HTTP_UPSTREAM_CREATE
-        |NGX_HTTP_UPSTREAM_WEIGHT;
+                  |NGX_HTTP_UPSTREAM_WEIGHT
+                  |NGX_HTTP_UPSTREAM_MAX_FAILS
+                  |NGX_HTTP_UPSTREAM_FAIL_TIMEOUT
+                  |NGX_HTTP_UPSTREAM_DOWN;
 
     return NGX_CONF_OK;
 }
