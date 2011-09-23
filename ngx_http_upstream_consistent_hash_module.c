@@ -116,7 +116,7 @@ ngx_http_upstream_init_consistent_hash(ngx_conf_t *cf,
         ngx_http_upstream_srv_conf_t *us)
 {
     /* ip max 15, :port max 6, maxweight is highest number of uchar */
-    u_char                                        hash_data[28];
+    u_char                                        hash_data[64];
     uint32_t                                      step;
     ngx_uint_t                                    i, j, k, n, points = 0;
     ngx_http_upstream_server_t                   *server;
@@ -149,8 +149,8 @@ ngx_http_upstream_init_consistent_hash(ngx_conf_t *cf,
     for (i = 0; i < us->servers->nelts; i++) {
         for (j = 0; j < server[i].naddrs; j++) {
             for (k = 0; k < ((MMC_CONSISTENT_POINTS * server[i].weight) / server[i].naddrs); k++) {
-                ngx_memzero(hash_data, 28);
-                ngx_snprintf(hash_data, 28, "%V-%ui", &server[i].addrs[j].name, k);
+                ngx_memzero(hash_data, 64);
+                ngx_snprintf(hash_data, 64, "redis://%V/0-%ui", &server[i].addrs[j].name, k);
                 continuum->nodes[continuum->nnodes].sockaddr = server[i].addrs[j].sockaddr;
                 continuum->nodes[continuum->nnodes].socklen = server[i].addrs[j].socklen;
                 continuum->nodes[continuum->nnodes].name = server[i].addrs[j].name;
