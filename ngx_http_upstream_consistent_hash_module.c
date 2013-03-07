@@ -20,6 +20,7 @@ typedef struct {
 typedef struct {
     uint32_t                     point;
     ngx_http_upstream_rr_peer_t *rr_peer;
+    uint32_t                     server_num;
 } ngx_http_upstream_consistent_hash_node;
 
 typedef struct {
@@ -191,6 +192,7 @@ ngx_http_upstream_init_consistent_hash(ngx_conf_t *cf,
                             (last - hash_data));
 
                 continuum->nodes[continuum->nnodes].rr_peer = rr_peer;
+                continuum->nodes[continuum->nnodes].server_num = i;
                 continuum->nnodes++;
             }
         }
@@ -379,7 +381,7 @@ ngx_http_upstream_get_consistent_hash_peer(ngx_peer_connection_t *pc,
         /* move to other buckets */
         point += 89 * uchpd->tries; 
 
-        p = point % uchpd->rrp.peers->number;
+        p = uchpd->buckets->bucket[point % MMC_CONSISTENT_BUCKETS]->server_num;
 
         n = p / (8 * sizeof(uintptr_t));
         m = (uintptr_t) 1 << p % (8 * sizeof(uintptr_t));
@@ -400,7 +402,7 @@ ngx_http_upstream_get_consistent_hash_peer(ngx_peer_connection_t *pc,
                 }
 
                 if (now - peer->accessed > peer->fail_timeout) {
-                    peer->fails = 0;
+                    peer->checked = now;
                     break;
                 }
             }
