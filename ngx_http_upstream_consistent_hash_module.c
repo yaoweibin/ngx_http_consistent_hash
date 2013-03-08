@@ -401,7 +401,7 @@ ngx_http_upstream_get_consistent_hash_peer(ngx_peer_connection_t *pc,
                     break;
                 }
 
-                if (now - peer->accessed > peer->fail_timeout) {
+                if (now - peer->checked > peer->fail_timeout) {
                     peer->checked = now;
                     break;
                 }
